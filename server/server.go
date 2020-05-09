@@ -11,6 +11,8 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"path"
+	"strings"
 )
 
 var (
@@ -19,6 +21,9 @@ var (
 	CertPemPath string
 	CertKeyPath string
 	EndPoint    string
+	SwaggerDir  string
+
+	tlsConfig *tls.Config
 )
 
 func Serve() (err error) {
@@ -31,7 +36,7 @@ func Serve() (err error) {
 	if err != nil {
 		log.Fatalf("GetTLSConfig err: %v", err)
 	}
-	srv := createInternalServer(tlsConfig)
+	srv := newServer(tlsConfig)
 	log.Printf("gRPC and https listen on: %s\n", ServerPort)
 	if err = srv.Serve(tls.NewListener(conn, tlsConfig)); err != nil {
 		log.Fatalf("ListenAndServe: %v\n", err)
@@ -39,20 +44,49 @@ func Serve() (err error) {
 	return err
 }
 
-func createInternalServer(tlsConfig *tls.Config) *http.Server {
-	var opts []grpc.ServerOption
+func newServer(tlsConfig *tls.Config) *http.Server {
+	grpcServer := newGrpc()
 
-	// grpc server
-	creds, err := credentials.NewClientTLSFromFile(CertPemPath, CertKeyPath)
-	if err != nil {
-		log.Fatalf("Failed to create server TLS credentials %v", err)
+	gwmux := newGateway()
+
+	// http服务
+	mux := http.NewServeMux()
+	mux.Handle("/", gwmux)
+	mux.HandleFunc("/swagger/", serveSwaggerFile)
+	serveSwaggerUI(mux)
+
+	return &http.Server{
+		Addr:      EndPoint,
+		Handler:   util.GrpcHandlerFunc(grpcServer, mux),
+		TLSConfig: tlsConfig,
 	}
-	opts = append(opts, grpc.Creds(creds))
-	grpcServer := grpc.NewServer(opts...)
+}
 
-	// register grpc pb
-	pb.RegisterHelloWorldServer(grpcServer, NewHelloService())
+func serveSwaggerUI(mux *http.ServeMux) {
+	//fileServer := http.FileServer(&assetfs.AssetFS{
+	//	Asset: swagger.Asset,
+	//	AssetDir: swagger.AssetDir,
+	//	Prefix: "third_party/swagger-ui",
+	//})
+	prefix := "/swaggerUI/"
+	mux.Handle(prefix, http.StripPrefix(prefix, http.FileServer(http.Dir("third_party/swagger-ui/"))))
+}
 
+func serveSwaggerFile(w http.ResponseWriter, r *http.Request) {
+	if !strings.HasSuffix(r.URL.Path, "swagger.json") {
+		log.Printf("Not Found: %s", r.URL.Path)
+		http.NotFound(w, r)
+		return
+	}
+	p := strings.TrimPrefix(r.URL.Path, "/swagger/")
+	p = path.Join(SwaggerDir, p)
+
+	log.Printf("Serving swagger-file: %s\n", p)
+
+	http.ServeFile(w, r, p)
+}
+
+func newGateway() http.Handler {
 	// grpc-gateway service
 	ctx := context.Background()
 	dcreds, err := credentials.NewClientTLSFromFile(CertPemPath, CertName)
@@ -66,14 +100,21 @@ func createInternalServer(tlsConfig *tls.Config) *http.Server {
 	if err := pb.RegisterHelloWorldHandlerFromEndpoint(ctx, gwmux, EndPoint, dopts); err != nil {
 		log.Fatalf("Failed to register gw server: %v\n", err)
 	}
+	return gwmux
+}
 
-	// http服务
-	mux := http.NewServeMux()
-	mux.Handle("/", gwmux)
+func newGrpc() *grpc.Server {
+	var opts []grpc.ServerOption
 
-	return &http.Server{
-		Addr:      EndPoint,
-		Handler:   util.GrpcHandlerFunc(grpcServer, mux),
-		TLSConfig: tlsConfig,
+	// grpc server
+	creds, err := credentials.NewClientTLSFromFile(CertPemPath, CertKeyPath)
+	if err != nil {
+		log.Fatalf("Failed to create server TLS credentials %v", err)
 	}
+	opts = append(opts, grpc.Creds(creds))
+	grpcServer := grpc.NewServer(opts...)
+
+	// register grpc pb
+	pb.RegisterHelloWorldServer(grpcServer, NewHelloService())
+	return grpcServer
 }
