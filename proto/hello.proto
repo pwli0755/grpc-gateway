@@ -6,10 +6,6 @@ import "google/api/annotations.proto";
 
 service HelloWorld {
     rpc SayHelloWorld (HelloWorldRequest) returns (HelloWorldResponese) {
-        option (google.api.http) = {
-            post: "/hello_world"
-            body: "*"
-        };
     }
 }
 
